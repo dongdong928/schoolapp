@@ -117,7 +117,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); ou
 .chip.ok { background: var(--ok-bg); color: var(--ok); }
 .chip.bad { background: var(--bad-bg); color: var(--bad); }
 h2 { margin: 0 0 14px; font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
-.add { display: grid; grid-template-columns: 120px 1fr auto; gap: 12px; align-items: end; }
+.add { display: grid; grid-template-columns: 120px 1fr 1fr auto; gap: 12px; align-items: end; }
 .add div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .add label { font-size: 12px; color: var(--muted); }
 .add .btn { padding: 11px 22px; }
@@ -140,8 +140,14 @@ td.acts .btn { margin-left: 6px; }
 .lockform { display: flex; flex-direction: column; gap: 12px; max-width: 320px; margin: 8px auto; }
 .lockform h2 { text-align: center; font-size: 17px; margin: 0; }
 .lockform .status { text-align: center; }
+.field.sm { padding: 4px 10px; font-size: 13px; border-radius: 999px; }
+td.phone { font-family: var(--font-num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.phone .field { width: 150px; }
+.paused { font-size: 12px; color: var(--muted); margin-right: 6px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.result .note { margin-top: 8px; padding-top: 8px; border-top: 1px solid currentColor; font-size: 13px; opacity: .9; }
 @media (max-width: 520px) {
   .add { grid-template-columns: 96px 1fr; }
+  .add #addPhoneWrap { grid-column: 1 / -1; }
   .add .btn { grid-column: 1 / -1; }
   .panel { padding: 20px; border-radius: 20px; }
 }
@@ -222,6 +228,7 @@ td.acts .btn { margin-left: 6px; }
       <form class="add" id="addForm" autocomplete="off">
         <div><label for="addNum">출석 번호 (숫자)</label><input class="field" id="addNum" inputmode="numeric" pattern="[0-9]*" maxlength="9" placeholder="1"></div>
         <div><label for="addName">이름</label><input class="field" id="addName" maxlength="20" placeholder="홍길동"></div>
+        <div id="addPhoneWrap"><label for="addPhone">전화번호 (선택)</label><input class="field" id="addPhone" inputmode="tel" maxlength="13" placeholder="010-1234-5678"></div>
         <button class="btn" type="submit">추가</button>
       </form>
       <p class="status" id="adminMsg" role="status" style="margin-top:12px"></p>
@@ -284,6 +291,11 @@ function makeLocalDb() {
   const todayStr = () => dstr(new Date());
   const normNum = (s) => String(s || "").replace(/\D/g, "").replace(/^0+/, "").slice(0, 9);
   const fmtTime = (t) => new Date(t).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const normPhone = (s) => String(s || "").replace(/\D/g, "").slice(0, 11);
+  const validPhone = (d) => d.length >= 9 && d.length <= 11;
+  const fmtPhone = (d) => (d.length === 11 ? d.replace(/(\d{3})(\d{4})(\d{4})/, "$1-$2-$3") : d.length === 10 ? d.replace(/(\d{3})(\d{3})(\d{4})/, "$1-$2-$3") : d);
+  const maskPhone = (d) => d.slice(0, 3) + "-****-" + d.slice(-4);
+  const isPaused = (s) => typeof s.pausedUntil === "number" && s.pausedUntil > Date.now();
   function h(tag, props, ...kids) {
     const e = document.createElement(tag);
     for (const [k, v] of Object.entries(props || {})) {
@@ -326,16 +338,18 @@ function makeLocalDb() {
   }
 
   $("tabs").hidden = false;
+  $("addPhoneWrap").hidden = !isAdmin;
 
   // ----- 상태 -----
   let rosterMap = new Map();   // "번호" -> {number, name}
+  let contactMap = new Map();  // "번호" -> 전화번호(숫자만, 편집 권한 계정만 읽음)
   let rosterReady = false;
   let attMap = new Map();      // "번호" -> {at, ...}
   let attReady = false;
   let mode = "student";
   let viewDate = todayStr();
   let unsubAtt = null;
-  let editingId = null, editDraft = "", confirmId = null;
+  let editingId = null, editDraft = "", editPhoneDraft = "", confirmId = null;
   let loadTimer = setTimeout(slowNote, 10000);
   let confirmed = { roster: false, att: false };
 
@@ -351,7 +365,7 @@ function makeLocalDb() {
     const m = new Map();
     snap.docs.forEach((d) => {
       const v = d.data() || {};
-      if (typeof v.number === "number" && typeof v.name === "string") m.set(String(v.number), { number: v.number, name: v.name });
+      if (typeof v.number === "number" && typeof v.name === "string") m.set(String(v.number), { number: v.number, name: v.name, phoneMask: typeof v.phoneMask === "string" ? v.phoneMask : "", pausedUntil: typeof v.pausedUntil === "number" ? v.pausedUntil : 0 });
     });
     rosterMap = m; rosterReady = true;
     if (!snap.metadata.fromCache) { confirmed.roster = true; checkConfirmed(); }
@@ -449,6 +463,26 @@ function makeLocalDb() {
     }
   });
 
+  // 전화번호 전체는 편집 권한 계정만 읽고 쓴다. 명단 문서에는 끝 4자리만 가린 형태로 둔다.
+  if (isAdmin) {
+    db.collection("contacts").onSnapshot((snap) => {
+      const m = new Map();
+      snap.docs.forEach((d) => { const v = d.data() || {}; if (typeof v.phone === "string") m.set(d.id, v.phone); });
+      contactMap = m;
+      if (mode === "admin" && unlocked && editingId === null) renderAdmin();
+    }, () => {});
+  }
+  setInterval(() => {
+    if (mode !== "admin" || !unlocked) return;
+    let expired = false;
+    document.querySelectorAll(".left").forEach((el) => {
+      const ms = Number(el.dataset.until) - Date.now();
+      if (ms <= 0) expired = true;
+      else { const sec = Math.ceil(ms / 1000); el.textContent = Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0"); }
+    });
+    if (expired && editingId === null) renderAdmin();
+  }, 1000);
+
   // ----- 탭 -----
   function setMode(m) {
     mode = m;
@@ -472,13 +506,13 @@ function makeLocalDb() {
   // ----- 학생: 출석 -----
   const okIcon = '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M7.5 12.5l3 3 6-6.5"/></svg>';
   const errIcon = '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 16.5v.5"/></svg>';
-  function showResult(kind, title, sub) {
+  function showResult(kind, title, sub, note) {
     const r = $("result");
     r.className = "result " + kind;
     r.hidden = false;
     r.replaceChildren();
     const ic = document.createElement("span"); ic.innerHTML = kind === "ok" ? okIcon : errIcon;
-    r.append(ic, h("div", null, h("div", { class: "big-name" }, title), sub ? h("div", { class: "sub" }, sub) : null));
+    r.append(ic, h("div", null, h("div", { class: "big-name" }, title), sub ? h("div", { class: "sub" }, sub) : null, note ? h("div", { class: "note" }, note) : null));
   }
   $("keypad").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-k]");
@@ -515,7 +549,8 @@ function makeLocalDb() {
       } else {
         const at = Date.now();
         await ref.set({ date, number: Number(n), name: stu.name, at });
-        showResult("ok", stu.name + " 님", "출석이 완료됐어요 · " + fmtTime(at));
+        const note = stu.phoneMask && !isPaused(stu) ? stu.phoneMask + " · " + stu.name + " 님이 " + fmtTime(at) + " 출석했습니다" : "";
+        showResult("ok", stu.name + " 님", "출석이 완료됐어요 · " + fmtTime(at), note);
       }
       $("num").value = "";
     } catch (e) {
@@ -532,6 +567,7 @@ function makeLocalDb() {
     adminMsg(e && e.code === "invalid_argument" ? "저장할 권한이 없어요. 공유 권한이 '참여자(Contributor)' 이상이어야 해요." : "저장하지 못했어요. 잠시 뒤에 다시 시도해 주세요.", true);
   }
   $("addNum").addEventListener("input", (e) => { e.target.value = e.target.value.replace(/\D/g, ""); });
+  $("addPhone").addEventListener("input", (e) => { e.target.value = e.target.value.replace(/[^\d-]/g, ""); });
   $("addForm").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const n = normNum($("addNum").value);
@@ -539,21 +575,44 @@ function makeLocalDb() {
     if (!n) return adminMsg("출석 번호를 1 이상의 숫자로 입력해 주세요.", true);
     if (!name) return adminMsg("이름을 입력해 주세요.", true);
     if (rosterMap.has(n)) return adminMsg(n + "번은 이미 " + rosterMap.get(n).name + " 님이 사용 중이에요. 이름을 바꾸려면 명단에서 '수정'을 누르세요.", true);
+    const phone = isAdmin ? normPhone($("addPhone").value) : "";
+    if (phone && !validPhone(phone)) return adminMsg("전화번호는 9~11자리 숫자로 입력해 주세요.", true);
     try {
-      await db.doc("roster/" + n).set({ number: Number(n), name });
+      const doc = { number: Number(n), name };
+      if (phone) doc.phoneMask = maskPhone(phone);
+      await db.doc("roster/" + n).set(doc);
+      if (phone) await db.doc("contacts/" + n).set({ phone });
       adminMsg(n + "번 " + name + " 님을 추가했어요.");
-      $("addNum").value = ""; $("addName").value = ""; $("addNum").focus();
+      $("addNum").value = ""; $("addName").value = ""; $("addPhone").value = ""; $("addNum").focus();
     } catch (e) { writeErr(e); }
   });
 
   async function saveEdit(n) {
     const name = editDraft.trim();
     if (!name) return adminMsg("이름을 입력해 주세요.", true);
-    try { await db.doc("roster/" + n).update({ name }); editingId = null; adminMsg("이름을 수정했어요."); render(); }
-    catch (e) { writeErr(e); }
+    let phone = "";
+    if (isAdmin) {
+      phone = normPhone(editPhoneDraft);
+      if (phone && !validPhone(phone)) return adminMsg("전화번호는 9~11자리 숫자로 입력해 주세요. 지우려면 비워 두세요.", true);
+    }
+    try {
+      const upd = { name };
+      if (isAdmin) { upd.phoneMask = phone ? maskPhone(phone) : null; if (!phone) upd.pausedUntil = null; }
+      await db.doc("roster/" + n).update(upd);
+      if (isAdmin) { if (phone) await db.doc("contacts/" + n).set({ phone }); else await db.doc("contacts/" + n).delete(); }
+      editingId = null; adminMsg("수정했어요."); render();
+    } catch (e) { writeErr(e); }
   }
   async function removeStudent(n) {
-    try { await db.doc("roster/" + n).delete(); confirmId = null; adminMsg(n + "번을 명단에서 삭제했어요."); render(); }
+    try { await db.doc("roster/" + n).delete(); if (isAdmin) { try { await db.doc("contacts/" + n).delete(); } catch (e) {} } confirmId = null; adminMsg(n + "번을 명단에서 삭제했어요."); render(); }
+    catch (e) { writeErr(e); }
+  }
+  async function pauseFor(n, min) {
+    try { await db.doc("roster/" + n).update({ pausedUntil: Date.now() + min * 60000 }); adminMsg(n + "번의 출석 알림 문구를 " + min + "분 동안 멈췄어요."); }
+    catch (e) { writeErr(e); }
+  }
+  async function resumeNotice(n) {
+    try { await db.doc("roster/" + n).update({ pausedUntil: null }); adminMsg(n + "번의 출석 알림 문구를 다시 켰어요."); }
     catch (e) { writeErr(e); }
   }
   async function toggleAtt(stu) {
@@ -594,7 +653,7 @@ function makeLocalDb() {
     const hadFocus = document.activeElement && document.activeElement.id === "editName";
     box.replaceChildren();
     if (!rosterReady) { box.append(h("p", { class: "empty" }, "명단을 불러오는 중이에요.")); return; }
-    if (list.length === 0) { box.append(h("p", { class: "empty" }, "등록된 학생이 없어요. 위에서 출석 번호와 이름을 추가하면 여기에 표시돼요.")); return; }
+    if (list.length === 0) { box.append(h("p", { class: "empty" }, "등록된 학생이 없어요. 위에서 출석 번호와 이름(전화번호는 선택)을 추가하면 여기에 표시돼요.")); return; }
     const rows = list.map((s) => {
       const key = String(s.number);
       const a = attMap.get(key);
@@ -604,6 +663,17 @@ function makeLocalDb() {
             oninput: (e) => { editDraft = e.target.value; },
             onkeydown: (e) => { if (e.key === "Enter") saveEdit(key); if (e.key === "Escape") { editingId = null; render(); } } })
         : s.name;
+      const phoneCell = editingId === key
+        ? h("input", { class: "field", id: "editPhone", value: editPhoneDraft, maxlength: "13", inputmode: "tel", placeholder: "비우면 삭제", "aria-label": key + "번 전화번호",
+            oninput: (e) => { editPhoneDraft = e.target.value.replace(/[^\d-]/g, ""); e.target.value = editPhoneDraft; },
+            onkeydown: (e) => { if (e.key === "Enter") saveEdit(key); if (e.key === "Escape") { editingId = null; render(); } } })
+        : (contactMap.get(key) ? fmtPhone(contactMap.get(key)) : (s.phoneMask || "–"));
+      let noticeCell;
+      if (!s.phoneMask) noticeCell = "–";
+      else if (isPaused(s)) noticeCell = [h("span", { class: "paused" }, "정지 ", h("span", { class: "left", "data-until": String(s.pausedUntil) }, (() => { const sec = Math.max(0, Math.ceil((s.pausedUntil - Date.now()) / 1000)); return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0"); })())),
+                                         h("button", { class: "btn ghost", type: "button", onclick: () => resumeNotice(key) }, "해제")];
+      else noticeCell = h("select", { class: "field sm", "aria-label": key + "번 알림 잠시 멈추기", onchange: (e) => { const v = Number(e.target.value); if (v) pauseFor(key, v); } },
+        h("option", { value: "" }, "알림 켜짐"), [1, 2, 3, 5, 10].map((m) => h("option", { value: String(m) }, m + "분 멈춤")));
       let acts;
       if (editingId === key) {
         acts = [h("button", { class: "btn ghost", type: "button", onclick: () => saveEdit(key) }, "저장"),
@@ -613,17 +683,19 @@ function makeLocalDb() {
                 h("button", { class: "btn ghost", type: "button", onclick: () => { confirmId = null; render(); } }, "취소")];
       } else {
         acts = [h("button", { class: "btn ghost", type: "button", onclick: () => toggleAtt(s) }, a ? "출석 취소" : "출석 처리"),
-                h("button", { class: "btn ghost", type: "button", onclick: () => { editingId = key; editDraft = s.name; confirmId = null; render(); } }, "수정"),
+                h("button", { class: "btn ghost", type: "button", onclick: () => { editingId = key; editDraft = s.name; editPhoneDraft = fmtPhone(contactMap.get(key) || ""); confirmId = null; render(); } }, "수정"),
                 h("button", { class: "btn ghost danger", type: "button", onclick: () => { confirmId = key; editingId = null; render(); } }, "삭제")];
       }
       return h("tr", null,
         h("td", { class: "n" }, h("span", { class: "badge" }, key)),
         h("td", { class: "name" }, nameCell),
+        isAdmin ? h("td", { class: "phone" }, phoneCell) : null,
+        h("td", null, noticeCell),
         h("td", null, a ? h("span", { class: "pill ok" }, "출석") : h("span", { class: "pill bad" }, "결석"), a && a.at ? h("span", { class: "time" }, fmtTime(a.at)) : null),
         h("td", { class: "acts" }, acts));
     });
     box.append(h("table", null,
-      h("thead", null, h("tr", null, h("th", null, "번호"), h("th", null, "이름"), h("th", null, "상태"), h("th", null, ""))),
+      h("thead", null, h("tr", null, h("th", null, "번호"), h("th", null, "이름"), isAdmin ? h("th", null, "전화번호") : null, h("th", null, "출석 알림"), h("th", null, "상태"), h("th", null, ""))),
       h("tbody", null, rows)));
     if (hadFocus) { const i = $("editName"); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
   }
