@@ -168,6 +168,7 @@ td.acts .btn { margin-left: 6px; }
   </header>
 
   <p class="status" id="status" role="status"></p>
+  <p class="status" id="note"></p>
 
   <section id="viewStudent" class="panel">
     <form class="checkin" id="checkForm" autocomplete="off">
@@ -234,6 +235,48 @@ td.acts .btn { margin-left: 6px; }
 </div>
 
 <script>
+// 공유 저장소에 연결하지 못했을 때 쓰는 대체 저장소: 이 브라우저의 localStorage에 보관한다.
+function makeLocalDb() {
+  const KEY = "attendance-app-v1";
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { return {}; } };
+  let store = load();
+  const subs = new Set();
+  const notify = () => subs.forEach((f) => f());
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (e) {} notify(); };
+  window.addEventListener("storage", (e) => { if (e.key === KEY) { store = load(); notify(); } });
+  const meta = { fromCache: false, hasPendingWrites: false };
+  const snapDoc = (path) => {
+    const v = store[path];
+    return { id: path.split("/").pop(), exists: v !== undefined, data: () => (v === undefined ? undefined : JSON.parse(JSON.stringify(v))), metadata: meta };
+  };
+  function docRef(path) {
+    return {
+      id: path.split("/").pop(), path,
+      get: async () => snapDoc(path),
+      set: async (d) => { store[path] = JSON.parse(JSON.stringify(d)); save(); },
+      update: async (d) => { if (!(path in store)) throw { code: "invalid_argument" }; Object.assign(store[path], d); save(); },
+      delete: async () => { delete store[path]; save(); },
+      onSnapshot(next) { const f = () => next(snapDoc(path)); subs.add(f); setTimeout(f, 0); return () => subs.delete(f); }
+    };
+  }
+  function query(coll, filters) {
+    const run = () => {
+      const prefix = coll + "/";
+      const docs = Object.keys(store)
+        .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes("/"))
+        .map(snapDoc)
+        .filter((s) => filters.every(([f, op, v]) => op !== "==" || s.data()[f] === v));
+      return { docs, size: docs.length, empty: docs.length === 0, metadata: meta };
+    };
+    return {
+      where: (f, op, v) => query(coll, [...filters, [f, op, v]]),
+      get: async () => run(),
+      onSnapshot(next) { const f = () => next(run()); subs.add(f); setTimeout(f, 0); return () => subs.delete(f); }
+    };
+  }
+  return { doc: docRef, collection: (c) => Object.assign(query(c, []), { doc: (id) => docRef(c + "/" + id) }) };
+}
+
 (async function () {
   const $ = (id) => document.getElementById(id);
   const pad = (n) => String(n).padStart(2, "0");
@@ -260,19 +303,26 @@ td.acts .btn { margin-left: 6px; }
   function setStatus(msg, isErr) { const s = $("status"); s.textContent = msg || ""; s.classList.toggle("err", !!isErr); }
 
   let db = null, isAdmin = false;
+  setStatus("연결하는 중이에요…");
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(null), ms))]);
   try {
     // 플랫폼 연결 객체는 스크립트가 시작된 직후에는 아직 없을 수 있어서 잠시 기다린다.
-    for (let i = 0; i < 80 && !window.claude; i++) await new Promise((r) => setTimeout(r, 100));
-    db = window.claude ? await window.claude.use("db") : null;
-    const user = window.claude ? await window.claude.use("user") : null;
-    isAdmin = user ? await user.canEdit() : false;
+    for (let i = 0; i < 40 && !window.claude; i++) await new Promise((r) => setTimeout(r, 100));
+    if (window.claude) {
+      db = await withTimeout(window.claude.use("db"), 8000);
+      if (db) {
+        const user = await withTimeout(window.claude.use("user"), 4000);
+        isAdmin = user ? (await withTimeout(user.canEdit(), 4000)) === true : false;
+      }
+    }
   } catch (e) { db = null; }
-
+  setStatus("");
   if (!db) {
-    setStatus("출석 기록을 사용하려면 로그인한 상태로 이 페이지를 열어 주세요.", true);
-    $("go").disabled = true;
-    $("num").disabled = true;
-    return;
+    // 공유 저장소에 연결하지 못하면 이 기기에만 저장하는 방식으로 계속 쓸 수 있게 한다.
+    db = makeLocalDb(); isAdmin = true;
+    $("note").textContent = window.claude
+      ? "로그인하지 않았거나 연결되지 않아 이 기기에만 저장돼요. 다른 기기와 공유하려면 claude.ai에 로그인한 뒤 다시 여세요."
+      : "이 화면에서는 공유 저장소를 쓸 수 없어 이 기기에만 저장돼요. 일반 브라우저에서 링크를 열어 보세요.";
   }
 
   $("tabs").hidden = false;
