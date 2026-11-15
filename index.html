@@ -261,6 +261,8 @@ td.acts .btn { margin-left: 6px; }
 
   let db = null, isAdmin = false;
   try {
+    // 플랫폼 연결 객체는 스크립트가 시작된 직후에는 아직 없을 수 있어서 잠시 기다린다.
+    for (let i = 0; i < 80 && !window.claude; i++) await new Promise((r) => setTimeout(r, 100));
     db = window.claude ? await window.claude.use("db") : null;
     const user = window.claude ? await window.claude.use("user") : null;
     isAdmin = user ? await user.canEdit() : false;
